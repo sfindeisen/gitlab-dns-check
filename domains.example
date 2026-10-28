@@ -1,0 +1,4 @@
+# Domains whose A/AAAA records hardcode GitLab Pages addresses.
+# One per line; '#' starts a comment.
+eisenbits.com
+mimalumni.pl
