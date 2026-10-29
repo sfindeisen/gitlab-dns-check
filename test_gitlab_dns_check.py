@@ -51,35 +51,52 @@ class CheckTest(unittest.TestCase):
             return g.check(domains)
 
     def test_matching_domain(self):
-        self.assertEqual(self.check({"example.com": GITLAB}), [])
+        self.assertEqual(self.check({"example.com": GITLAB}),
+                         {"example.com": None})
 
     def test_changed_address(self):
         stale = {"A": {"35.185.44.1"}, "AAAA": GITLAB["AAAA"]}
         self.assertEqual(self.check({"example.com": stale}),
-                         ["example.com A: 35.185.44.1 (GitLab Pages: 35.185.44.232)"])
+                         {"example.com": "A 35.185.44.1 (GitLab Pages: 35.185.44.232)"})
+
+    def test_all_wrong_records_in_one_problem(self):
+        empty = {"A": set(), "AAAA": set()}
+        self.assertEqual(self.check({"example.com": empty})["example.com"],
+                         "A none (GitLab Pages: 35.185.44.232); "
+                         "AAAA none (GitLab Pages: 2600:1901:0:7b8a::)")
 
     def test_domain_lookup_failure(self):
         error = socket.gaierror(socket.EAI_AGAIN, "temporary failure")
-        [problem] = self.check({"example.com": error})
-        self.assertIn("example.com: lookup failed", problem)
+        problem = self.check({"example.com": error})["example.com"]
+        self.assertIn("lookup failed", problem)
+
+    def test_every_domain_reported_in_order(self):
+        stale = {"A": {"35.185.44.1"}, "AAAA": GITLAB["AAAA"]}
+        result = self.check({"stale.example": stale, "example.com": GITLAB},
+                            domains=["stale.example", "example.com"])
+        self.assertEqual(list(result), ["stale.example", "example.com"])
+        self.assertIn("A 35.185.44.1", result["stale.example"])
+        self.assertIsNone(result["example.com"])
 
     def test_invalid_name_does_not_stop_later_domains(self):
         # The socket module rejects malformed names with UnicodeError.
         error = UnicodeError("label empty or too long")
-        stale = {"A": {"35.185.44.1"}, "AAAA": GITLAB["AAAA"]}
-        invalid, later = self.check({"a..b.pl": error, "example.com": stale},
-                                    domains=["a..b.pl", "example.com"])
-        self.assertIn("a..b.pl: lookup failed", invalid)
-        self.assertIn("example.com A: 35.185.44.1", later)
+        result = self.check({"a..b.pl": error, "example.com": GITLAB},
+                            domains=["a..b.pl", "example.com"])
+        self.assertIn("lookup failed", result["a..b.pl"])
+        self.assertIsNone(result["example.com"])
 
-    def test_reference_lookup_failure(self):
+    def test_reference_lookup_failure_fails_every_domain(self):
         error = socket.gaierror(socket.EAI_AGAIN, "temporary failure")
-        [problem] = self.check({g.REFERENCE_HOST: error, "example.com": GITLAB})
-        self.assertIn(f"{g.REFERENCE_HOST}: lookup failed", problem)
+        result = self.check({g.REFERENCE_HOST: error},
+                            domains=["a.example", "b.example"])
+        self.assertEqual(list(result), ["a.example", "b.example"])
+        for problem in result.values():
+            self.assertIn(f"{g.REFERENCE_HOST}: lookup failed", problem)
 
     def test_reference_without_address(self):
         empty = {"A": set(), "AAAA": set()}
-        [problem] = self.check({g.REFERENCE_HOST: empty, "example.com": empty})
+        problem = self.check({g.REFERENCE_HOST: empty})["example.com"]
         self.assertIn(f"{g.REFERENCE_HOST}: no A record", problem)
 
 
@@ -92,30 +109,35 @@ class SendMailTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def run_main(self, problems):
+    def run_main(self, results):
         log = io.StringIO()
-        with mock.patch.object(g, "read_domains", return_value=["example.com"]), \
-             mock.patch.object(g, "check", return_value=problems), \
+        with mock.patch.object(g, "read_domains", return_value=list(results)), \
+             mock.patch.object(g, "check", return_value=results), \
              mock.patch.object(g, "send_mail") as send_mail, \
              mock.patch("sys.argv", ["gitlab_dns_check.py"]), \
              redirect_stdout(log):
             status = g.main()
-        return status, log.getvalue(), send_mail
+        # Drop the timestamp that starts every per-domain line.
+        lines = [line.split(" ", 1)[-1] for line in log.getvalue().splitlines()]
+        return status, lines, send_mail
 
-    def test_ok_logs_one_line_and_sends_no_mail(self):
-        status, log, send_mail = self.run_main([])
+    def test_ok_line_per_domain_and_no_mail(self):
+        status, lines, send_mail = self.run_main({"a.example": None,
+                                                  "b.example": None})
         self.assertEqual(status, 0)
-        self.assertEqual(len(log.splitlines()), 1)
-        self.assertIn(" OK: example.com match ", log)
+        self.assertEqual(lines, ["OK a.example", "OK b.example"])
         send_mail.assert_not_called()
 
-    def test_failure_warns_and_mails(self):
-        status, log, send_mail = self.run_main(["example.com A: broken"])
+    def test_error_line_per_failed_domain_warns_and_mails(self):
+        status, lines, send_mail = self.run_main({"a.example": None,
+                                                  "b.example": "A broken"})
         self.assertEqual(status, 1)
-        self.assertIn("WARNING: GitLab Pages DNS check FAILED", log)
-        self.assertIn("!!! example.com A: broken", log)
+        self.assertEqual(lines[:2], ["OK a.example", "ERROR b.example: A broken"])
+        self.assertIn("WARNING: GitLab Pages DNS check FAILED", "\n".join(lines[2:]))
         send_mail.assert_called_once()
-        self.assertEqual(send_mail.call_args.args[1], "example.com A: broken\n")
+        body = send_mail.call_args.args[1]
+        self.assertTrue(body.endswith(" ERROR b.example: A broken\n"))
+        self.assertNotIn("a.example", body)
 
 
 if __name__ == "__main__":

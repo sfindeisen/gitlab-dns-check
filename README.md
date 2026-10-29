@@ -4,12 +4,15 @@ An apex domain served by GitLab Pages needs A and AAAA records holding
 GitLab's literal addresses. If GitLab ever moves Pages, those records go
 stale without notice. `gitlab_dns_check.py` compares the addresses of each
 listed domain with those of `gitlab-org.gitlab.io` (every `*.gitlab.io` name
-resolves to the current Pages addresses) and:
+resolves to the current Pages addresses) and logs one line per domain:
 
-- logs a single `OK` line when all domains match;
-- logs a large `!!!` warning and mails `root` when any domain differs or a
-  lookup fails. A failed lookup counts as a failure, so the check never
-  reports an unverifiable state as fine.
+- `OK` when the domain matches;
+- `ERROR` with the reason when it differs or a lookup fails. A failed lookup
+  counts as a failure, so the check never reports an unverifiable state as
+  fine.
+
+When any domain fails, it also logs a large `!!!` warning and mails the
+`ERROR` lines to `root`.
 
 It needs Python 3.8 or later (standard library only) and a local mail
 transfer agent providing `/usr/sbin/sendmail`.
@@ -22,7 +25,7 @@ The commands assume the repository is in `~/gitlab-dns-check`.
     cp ~/gitlab-dns-check/domains.example ~/.config/gitlab-dns-check/domains
     ~/gitlab-dns-check/gitlab_dns_check.py
 
-The last command should print a single `OK` line.
+The last command should print an `OK` line for each domain.
 
 The domain list has one domain per line; `#` starts a comment.
 

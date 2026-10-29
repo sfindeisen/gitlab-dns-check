@@ -4,7 +4,7 @@
 An apex domain served by GitLab Pages needs A and AAAA records holding
 GitLab's literal addresses, which go stale silently if GitLab moves Pages.
 This compares each listed domain with a *.gitlab.io name, which GitLab keeps
-up to date, logs one line when all match and mails root when any does not.
+up to date, logs an OK or ERROR line for each and mails root when any fails.
 """
 
 import argparse
@@ -51,28 +51,30 @@ def fmt(addresses):
     return " ".join(sorted(addresses)) or "none"
 
 
+def compare(domain, expected):
+    """Return what is wrong with domain's addresses, or None if they match."""
+    try:
+        actual = resolve(domain)
+    # The socket module rejects malformed names (e.g. "a..b") with
+    # UnicodeError, which is not an OSError.
+    except (OSError, UnicodeError) as e:
+        return f"lookup failed: {e}"
+    wrong = [f"{rtype} {fmt(actual[rtype])} (GitLab Pages: {fmt(addresses)})"
+             for rtype, addresses in expected.items()
+             if actual[rtype] != addresses]
+    return "; ".join(wrong) or None
+
+
 def check(domains):
-    """Return a list of problems, empty when every domain matches GitLab."""
+    """Return {domain: problem}, where problem is None if domain matches GitLab."""
     try:
         expected = resolve(REFERENCE_HOST)
     except OSError as e:
-        return [f"{REFERENCE_HOST}: lookup failed: {e}"]
+        return dict.fromkeys(domains, f"{REFERENCE_HOST}: lookup failed: {e}")
     if not expected["A"]:
-        return [f"{REFERENCE_HOST}: no A record, cannot tell GitLab's address"]
-    problems = []
-    for domain in domains:
-        try:
-            actual = resolve(domain)
-        # The socket module rejects malformed names (e.g. "a..b") with
-        # UnicodeError, which is not an OSError.
-        except (OSError, UnicodeError) as e:
-            problems.append(f"{domain}: lookup failed: {e}")
-            continue
-        for rtype, addresses in expected.items():
-            if actual[rtype] != addresses:
-                problems.append(f"{domain} {rtype}: {fmt(actual[rtype])} "
-                                f"(GitLab Pages: {fmt(addresses)})")
-    return problems
+        return dict.fromkeys(
+            domains, f"{REFERENCE_HOST}: no A record, cannot tell GitLab's address")
+    return {domain: compare(domain, expected) for domain in domains}
 
 
 def send_mail(subject, body):
@@ -89,17 +91,22 @@ def main():
                         help=f"one domain per line (default: {DEFAULT_DOMAINS_FILE})")
     args = parser.parse_args()
     domains = read_domains(args.domains_file)
-    problems = check(domains)
     now = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
-    if not problems:
-        print(f"{now} OK: {' '.join(domains)} match {REFERENCE_HOST}")
+    errors = []
+    for domain, problem in check(domains).items():
+        if problem:
+            errors.append(f"{now} ERROR {domain}: {problem}")
+            print(errors[-1])
+        else:
+            print(f"{now} OK {domain}")
+    if not errors:
         return 0
     banner = "!" * 72
-    lines = [f"{now} WARNING: GitLab Pages DNS check FAILED", *problems]
+    warning = f"!!! WARNING: GitLab Pages DNS check FAILED for {len(errors)} domain(s)"
     # Flush so the warning reaches the log even if sending mail fails below.
-    print(banner, *("!!! " + line for line in lines), banner, sep="\n", flush=True)
+    print(banner, warning, banner, sep="\n", flush=True)
     send_mail(f"GitLab Pages DNS check FAILED on {socket.gethostname()}",
-              "\n".join(problems) + "\n")
+              "\n".join(errors) + "\n")
     return 1
 
 
