@@ -45,10 +45,10 @@ class ResolveTest(unittest.TestCase):
 
 
 class CheckTest(unittest.TestCase):
-    def check(self, table):
+    def check(self, table, domains=("example.com",)):
         table = {g.REFERENCE_HOST: GITLAB, **table}
         with mock.patch.object(g, "resolve", fake_resolve(table)):
-            return g.check(["example.com"])
+            return g.check(domains)
 
     def test_matching_domain(self):
         self.assertEqual(self.check({"example.com": GITLAB}), [])
@@ -62,6 +62,15 @@ class CheckTest(unittest.TestCase):
         error = socket.gaierror(socket.EAI_AGAIN, "temporary failure")
         [problem] = self.check({"example.com": error})
         self.assertIn("example.com: lookup failed", problem)
+
+    def test_invalid_name_does_not_stop_later_domains(self):
+        # The socket module rejects malformed names with UnicodeError.
+        error = UnicodeError("label empty or too long")
+        stale = {"A": {"35.185.44.1"}, "AAAA": GITLAB["AAAA"]}
+        invalid, later = self.check({"a..b.pl": error, "example.com": stale},
+                                    domains=["a..b.pl", "example.com"])
+        self.assertIn("a..b.pl: lookup failed", invalid)
+        self.assertIn("example.com A: 35.185.44.1", later)
 
     def test_reference_lookup_failure(self):
         error = socket.gaierror(socket.EAI_AGAIN, "temporary failure")

@@ -63,7 +63,9 @@ def check(domains):
     for domain in domains:
         try:
             actual = resolve(domain)
-        except OSError as e:
+        # The socket module rejects malformed names (e.g. "a..b") with
+        # UnicodeError, which is not an OSError.
+        except (OSError, UnicodeError) as e:
             problems.append(f"{domain}: lookup failed: {e}")
             continue
         for rtype, addresses in expected.items():
